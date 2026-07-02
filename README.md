@@ -1,67 +1,64 @@
-# Distributed Chat System - Demo Version
+# Distributed Chat System - Prototype
 
-This is the simple demo version for the Distributed Systems project.
-It is built to demonstrate exactly the required project criteria:
+This project implements a distributed chat system as a prototype for the Distributed Systems module.
 
-- Dynamic discovery of hosts
-- Crash fault tolerance
-- Election with ring left/right communication
-- At least two physical machines for the demo
-- Clear architecture explanation
+The system demonstrates the following distributed systems concepts:
+
+* Dynamic discovery of server nodes
+* Logical ring topology between server nodes
+* Leader election based on unique node IDs
+* Communication with left/right ring neighbors
+* Crash fault tolerance through heartbeat-based failure detection
+* Automatic client reconnection after leader failure
+* Demonstration on at least two physical machines
 
 ## Files
 
-- `ds_node.py` = server node
-- `ds_client.py` = chat client
+* `ds_node.py` = server node
+* `ds_client.py` = chat client
 
-No external Python packages are needed.
+The implementation only uses the Python standard library.
+No external Python packages are required.
 
+## System Overview
 
-## Voting / Leader Election (matches our project form)
+The distributed chat system consists of multiple server nodes and one or more chat clients.
 
-Our project form says: leader election is based on unique server node IDs. When the current leader becomes unavailable, the active node with the highest ID becomes the new leader.
+The server nodes discover each other dynamically using UDP multicast/broadcast. Based on the discovered nodes, each server builds a logical ring ordered by the unique server node IDs.
 
-This demo implements exactly that rule, but the election message is still passed through the server ring. So we satisfy both ideas:
+Only the current leader accepts client connections. Followers reject client connections with a `NOT_LEADER` response. The client then continues searching until it reaches the current leader.
 
-- the winner is the highest active server node ID
-- the election is demonstrated with ring/right-neighbor communication
+The leader receives chat messages from connected clients and broadcasts them to all connected clients.
+
+## Leader Election
+
+Leader election is based on unique server node IDs.
+
+The active node with the highest ID becomes the leader.
+
+The election process is demonstrated through ring communication. When an election starts, a node sends an election message to its right neighbor. The message is forwarded through the ring. During this process, the highest active node ID is determined.
+
+When the winning node receives the election result, it declares itself as leader and sends a leader announcement through the ring.
 
 Example:
 
-- Active nodes: 1, 2, 3 -> Leader = 3
-- Node 3 crashes -> Active nodes: 1, 2 -> New Leader = 2
-- Node 2 crashes -> Active node: 1 -> New Leader = 1
+* Active nodes: 1, 2, 3 → Leader = Node 3
+* Node 3 crashes → Active nodes: 1, 2 → New leader = Node 2
+* Node 2 crashes → Active node: 1 → New leader = Node 1
 
-## Architecture
+## Crash Fault Tolerance
 
-```mermaid
-graph TB
-    C1[Chat Client 1]
-    C2[Chat Client 2]
+The system detects leader failures using heartbeat messages.
 
-    subgraph Server_Ring[Server ring discovered dynamically]
-        N1[Node 1 / Follower]
-        N2[Node 2 / Follower]
-        N3[Node 3 / Leader]
-        N1 -->|right neighbor: election / heartbeat / replication| N2
-        N2 -->|right neighbor: election / heartbeat / replication| N3
-        N3 -->|right neighbor: election / heartbeat / replication| N1
-    end
+The leader sends heartbeat messages through the ring. If followers stop receiving heartbeats, they assume that the leader has crashed and start a new election.
 
-    C1 -->|connects to current leader| N3
-    C2 -->|connects to current leader| N3
+When the leader crashes, connected clients lose their TCP connection. The client detects this connection loss and automatically starts a new discovery process. After a new leader has been elected, the client reconnects to the new leader.
 
-    D[UDP multicast + broadcast discovery]
-    D -. HELLO announcements .-> N1
-    D -. HELLO announcements .-> N2
-    D -. HELLO announcements .-> N3
-    C1 -. listens for HELLO .-> D
-    C2 -. listens for HELLO .-> D
-```
+This demonstrates basic crash fault tolerance and failover behavior.
 
-## Local test on one laptop
+## Local Test on One Machine
 
-Open 4 terminals in the same folder.
+Open four terminals in the project folder.
 
 Terminal 1:
 
@@ -87,17 +84,19 @@ Terminal 4:
 py ds_client.py
 ```
 
-Expected result:
+Expected behavior:
 
-- Nodes discover each other.
-- Ring becomes `1 -> 2 -> 3`.
-- Node 3 becomes leader.
-- Client connects to leader Node 3.
-- Chat messages are sent through Node 3.
+* The nodes discover each other.
+* The logical ring is built as `1 -> 2 -> 3`.
+* Node 3 becomes the leader.
+* The client connects to leader Node 3.
+* Chat messages are sent through the leader.
 
-## Demo on two physical machines
+## Demo on Two Physical Machines
 
-Use one shared phone hotspot if university Wi-Fi blocks multicast/broadcast.
+The demo can also be executed on two physical machines in the same network.
+
+If the university Wi-Fi blocks multicast or broadcast traffic, both laptops can be connected to the same mobile hotspot.
 
 ### Laptop A
 
@@ -133,38 +132,52 @@ Terminal 2:
 py ds_client.py
 ```
 
-## Windows firewall rules
+## Windows Firewall Rules
 
-Run PowerShell as Administrator on both laptops:
+On both laptops, run PowerShell as Administrator and execute:
 
 ```powershell
 New-NetFirewallRule -DisplayName "DS Chat TCP" -Direction Inbound -Protocol TCP -LocalPort 6001-6010,7001-7010 -Action Allow
 New-NetFirewallRule -DisplayName "DS Chat UDP Discovery" -Direction Inbound -Protocol UDP -LocalPort 50000 -Action Allow
 ```
 
-## What to show in the demo
+These rules allow the server nodes and clients to communicate over TCP and allow UDP-based discovery.
 
-1. Start Node 1, Node 2, Node 3.
-2. Show discovery logs: `DISCOVERY found node ...`.
-3. Show ring status: `ring=[1 -> 2 -> 3]`.
-4. Show leader election: `I AM LEADER` on Node 3.
-5. Start two clients and send messages.
-6. Kill Node 3 with `Ctrl + C`.
-7. Show crash detection: `CRASH DETECTED`.
-8. Show new election.
-9. Show Node 2 becoming leader.
-10. Show clients reconnecting automatically.
+## Demonstration Scenario
 
-## Explanation text
+The following steps can be shown during the project demonstration:
+
+1. Start Node 1, Node 2, and Node 3.
+2. Show that the nodes discover each other dynamically.
+3. Show the logical ring structure, for example `ring=[1 -> 2 -> 3]`.
+4. Show that Node 3 becomes the leader because it has the highest active node ID.
+5. Start two clients and send chat messages.
+6. Stop Node 3 with `Ctrl + C`.
+7. Show that the failure is detected.
+8. Show that a new election is started.
+9. Show that Node 2 becomes the new leader.
+10. Show that the clients reconnect automatically to the new leader.
+
+## Architecture Explanation
 
 Our project is a distributed chat system. Several server nodes discover each other dynamically using UDP multicast and broadcast. From the discovered nodes, each server builds the same logical ring ordered by node ID.
 
-The leader election uses ring communication. When an election starts, a node sends an election message only to its right neighbor. The message travels through the ring. The highest active node ID wins. When the winning node receives its own ID again, it declares itself leader and sends a leader announcement through the ring.
+The leader election uses ring communication. When an election starts, a node sends an election message only to its right neighbor. The message travels through the ring. The highest active node ID wins. When the winning node receives the election result, it declares itself as leader and sends a leader announcement through the ring.
 
 Only the leader accepts chat clients. Followers reject clients with `NOT_LEADER`, so the client keeps searching until it reaches the leader. The leader receives chat messages and broadcasts them to connected clients.
 
 For crash fault tolerance, the leader sends heartbeat messages through the ring. If followers stop receiving heartbeats, they assume that the leader crashed and start a new election. The client notices the broken connection and automatically reconnects to the new leader.
 
-## Important demo note
+## Limitations
 
-Do not claim this is a production system. It is a university demo prototype for dynamic discovery, ring election, heartbeat failure detection, failover, and basic in-memory message replication.
+This system is a university prototype and is not intended for production use.
+
+The focus of the implementation is to demonstrate core distributed systems concepts such as dynamic discovery, ring-based leader election, heartbeat-based failure detection, failover, and basic client reconnection.
+
+Possible limitations are:
+
+* Messages are stored only in memory.
+* There is no persistent database.
+* There is no authentication or encryption.
+* The system focuses on crash fault tolerance, not Byzantine fault tolerance.
+* The implementation is optimized for demonstration and explanation, not for large-scale production deployment.
