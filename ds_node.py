@@ -33,6 +33,7 @@ Run examples:
 Only Python standard library is used.
 """
 
+# Standardbibliotheken für Netzwerkkommunikation, Threads, Zeit und Kommandozeilenargumente.
 import argparse
 import base64
 import socket
@@ -42,15 +43,18 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
+# Zentrale Netzwerkeinstellungen für die automatische Suche nach anderen Nodes.
 MULTICAST_GROUP = "239.1.1.1"
 DISCOVERY_PORT = 50000
 
+# Zeitabstände und Timeouts für Discovery, Heartbeats und Statusausgaben.
 HELLO_INTERVAL = 1.0
 NODE_TIMEOUT = 4.0
 HEARTBEAT_INTERVAL = 1.0
 HEARTBEAT_TIMEOUT = 6.0
 STATUS_INTERVAL = 4.0
 
+# Aus der Node-ID werden feste TCP-Ports abgeleitet, z. B. Node 3 -> Ports 6003 und 7003.
 NODE_PORT_BASE = 6000
 CLIENT_PORT_BASE = 7000
 
@@ -58,10 +62,12 @@ BIND_HOST = "0.0.0.0"
 BROADCAST_ADDRESS = "255.255.255.255"
 
 
+# Liefert die aktuelle Zeit; sie wird für Timeouts und Zeitstempel verwendet.
 def now() -> float:
     return time.time()
 
 
+# Ermittelt automatisch die lokale LAN-IP, die andere Rechner im Netzwerk erreichen können.
 def get_lan_ip() -> str:
     """Return the LAN IP address used for outgoing traffic."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -77,10 +83,12 @@ def get_lan_ip() -> str:
         s.close()
 
 
+# Einheitliche Log-Ausgabe mit Uhrzeit und Node-ID für eine verständliche Demo.
 def log(node_id: int, msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] node {node_id}: {msg}", flush=True)
 
 
+# Chattext wird für das einfache, mit | getrennte Nachrichtenformat sicher kodiert.
 def safe_b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
@@ -89,25 +97,31 @@ def safe_unb64(text: str) -> str:
     return base64.b64decode(text.encode("ascii")).decode("utf-8", errors="replace")
 
 
+# Ein Node ist ein eigenständiger Serverprozess und kann Leader oder Follower sein.
 class Node:
     def __init__(self, node_id: int, host: Optional[str] = None):
+        # Eindeutige Identität, Netzwerkadresse und die beiden TCP-Ports dieses Nodes.
         self.node_id = node_id
         self.host = host or get_lan_ip()
         self.node_port = NODE_PORT_BASE + node_id
         self.client_port = CLIENT_PORT_BASE + node_id
 
+        # Lokale Sicht auf bekannte Nodes; der Lock schützt vor gleichzeitigen Thread-Zugriffen.
         self.nodes_lock = threading.Lock()
         self.nodes: Dict[int, Dict[str, object]] = {}
 
+        # Gemeinsamer Koordinationszustand für Leader-Wahl und Heartbeat-Überwachung.
         self.state_lock = threading.Lock()
         self.leader_id: Optional[int] = None
         self.participant = False
         self.last_heartbeat = now()
         self.heartbeat_seq = 0
 
+        # Aktuell verbundene Chat-Clients werden nur vom Leader verwaltet.
         self.clients_lock = threading.Lock()
         self.clients: List[socket.socket] = []
 
+        # Nachrichtenhistorie und bereits gesehene Replikate liegen nur im Arbeitsspeicher.
         self.history_lock = threading.Lock()
         self.chat_history: List[Tuple[str, str]] = []
         self.seen_replica_ids = set()
@@ -117,6 +131,7 @@ class Node:
 
         self._register_self()
 
+    # Trägt den eigenen Node direkt in die lokale Membership- bzw. Group-View ein.
     def _register_self(self) -> None:
         with self.nodes_lock:
             self.nodes[self.node_id] = {
@@ -126,6 +141,7 @@ class Node:
                 "last": now(),
             }
 
+    # Bestimmt die aktuelle Rolle anhand der gespeicherten Leader-ID.
     def role(self) -> str:
         with self.state_lock:
             return "LEADER" if self.leader_id == self.node_id else "FOLLOWER"
@@ -134,6 +150,7 @@ class Node:
         with self.state_lock:
             return self.leader_id == self.node_id
 
+    # Filtert veraltete Nodes anhand ihres letzten HELLO-Zeitpunkts heraus.
     def active_node_ids(self) -> List[int]:
         cutoff = now() - NODE_TIMEOUT
         with self.nodes_lock:
@@ -146,6 +163,7 @@ class Node:
     def active_ring_string(self) -> str:
         return " -> ".join(str(x) for x in self.active_node_ids())
 
+    # Der rechte Nachbar ist die nächste aktive ID; nach der höchsten ID beginnt der Ring wieder von vorn.
     def right_neighbor_id(self) -> Optional[int]:
         ids = self.active_node_ids()
         if len(ids) <= 1 or self.node_id not in ids:
@@ -153,6 +171,7 @@ class Node:
         idx = ids.index(self.node_id)
         return ids[(idx + 1) % len(ids)]
 
+    # Markiert einen nicht erreichbaren Node lokal als veraltet, damit er nicht weiter verwendet wird.
     def mark_node_dead(self, nid: int) -> None:
         if nid == self.node_id:
             return
@@ -160,6 +179,7 @@ class Node:
             if nid in self.nodes:
                 self.nodes[nid]["last"] = 0.0
 
+    # Sendet genau eine TCP-Nachricht an einen bestimmten Server-Node.
     def send_to_node(self, nid: int, line: str) -> bool:
         with self.nodes_lock:
             info = self.nodes.get(nid)
@@ -176,6 +196,7 @@ class Node:
             self.mark_node_dead(nid)
             return False
 
+    # Leitet Ring-Nachrichten an den nächsten erreichbaren rechten Nachbarn weiter.
     def send_to_right(self, line: str) -> bool:
         """Forward one ring message to the next reachable right neighbor."""
         ids = self.active_node_ids()
@@ -193,8 +214,11 @@ class Node:
             log(self.node_id, f"ring neighbor node {nid} not reachable, skipping")
         return False
 
+    # -------------------- Dynamic Discovery --------------------
+    # Nodes finden sich ohne fest eingetragene IP-Adressen über wiederholte HELLO-Nachrichten.
     # Dynamic discovery
 
+    # Veröffentlicht regelmäßig die eigene ID, Adresse, Ports, Rolle und bekannte Leader-ID.
     def discovery_sender(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, struct.pack("b", 1))
@@ -213,6 +237,7 @@ class Node:
             time.sleep(HELLO_INTERVAL)
         sock.close()
 
+    # Empfängt HELLO-Nachrichten und aktualisiert damit die lokale Sicht auf die Gruppe.
     def discovery_listener(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -221,6 +246,7 @@ class Node:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             except OSError:
                 pass
+        # Lauscht auf allen lokalen Netzwerkschnittstellen am gemeinsamen Discovery-Port.
         sock.bind(("", DISCOVERY_PORT))
         try:
             mreq = struct.pack("4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
@@ -237,6 +263,7 @@ class Node:
             except OSError:
                 continue
 
+            # Zerlegt das einfache Textprotokoll und ignoriert ungültige Discovery-Nachrichten.
             parts = data.decode("utf-8", errors="ignore").strip().split("|")
             if len(parts) != 7 or parts[0] != "HELLO":
                 continue
@@ -251,6 +278,7 @@ class Node:
             if nid == self.node_id:
                 continue
 
+            # Speichert oder aktualisiert den Absender inklusive Zeitpunkt der letzten Sichtung.
             first_time = False
             with self.nodes_lock:
                 first_time = nid not in self.nodes
@@ -264,6 +292,7 @@ class Node:
             if first_time:
                 log(self.node_id, f"DISCOVERY found node {nid} at {host}:{node_port}; ring now [{self.active_ring_string()}]")
 
+            # Eine angekündigte Leader-ID kann übernommen werden, wenn lokal noch kein Leader bekannt ist.
             # Learn leader passively from discovery messages if available.
             if announced_leader > 0:
                 with self.state_lock:
@@ -271,6 +300,7 @@ class Node:
                         self.leader_id = announced_leader
                         self.last_heartbeat = now()
 
+            # Ein neu entdeckter Node mit höherer ID kann eine neue Wahl auslösen.
             # If a stronger node appears, run a fresh ring election.
             with self.state_lock:
                 current_leader = self.leader_id
@@ -279,8 +309,10 @@ class Node:
 
         sock.close()
 
+    # -------------------- Server-zu-Server-Kommunikation --------------------
     # Node-to-node TCP server
 
+    # TCP-Server für Election-, Leader-, Heartbeat- und Replica-Nachrichten.
     def node_server(self) -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -296,9 +328,11 @@ class Node:
                 continue
             except OSError:
                 break
+            # Jede eingehende Verbindung wird parallel in einem eigenen Thread verarbeitet.
             threading.Thread(target=self.handle_node_connection, args=(conn,), daemon=True).start()
         srv.close()
 
+    # Liest eine vollständige, mit Zeilenumbruch abgeschlossene Ring-Nachricht.
     def handle_node_connection(self, conn: socket.socket) -> None:
         try:
             conn.settimeout(3.0)
@@ -318,6 +352,7 @@ class Node:
                 pass
         self.handle_ring_message(line)
 
+    # Verteilt die empfangene Nachricht abhängig vom Nachrichtentyp an die passende Funktion.
     def handle_ring_message(self, line: str) -> None:
         parts = line.split("|", 3)
         kind = parts[0] if parts else ""
@@ -351,14 +386,19 @@ class Node:
             self.handle_replica(line)
             return
 
+    # -------------------- Leader Election --------------------
+    # LCR-ähnliche Wahl: Kandidaten-IDs laufen nur in eine Richtung durch den logischen Ring.
     # LCR-style ring election
 
+    # Startet eine Wahl mit der eigenen ID, sofern der Node nicht bereits Teilnehmer ist.
     def start_election(self, reason: str) -> None:
         active = self.active_node_ids()
+        # Ist nur ein Node aktiv, kann er ohne weitere Nachrichten direkt Leader werden.
         if len(active) == 1:
             self.become_leader("single active node")
             return
 
+        # participant verhindert, dass derselbe Node seine ID mehrfach in dieselbe Wahl einfügt.
         with self.state_lock:
             if self.participant:
                 return
@@ -370,9 +410,11 @@ class Node:
         if not ok:
             self.become_leader("no reachable right neighbor")
 
+    # Vergleicht die empfangene Kandidaten-ID mit der eigenen Node-ID.
     def handle_election(self, candidate: int) -> None:
         log(self.node_id, f"ELECTION received candidate {candidate}")
 
+        # Größere Kandidaten werden unverändert weitergeleitet.
         if candidate > self.node_id:
             with self.state_lock:
                 self.participant = True
@@ -380,6 +422,7 @@ class Node:
             self.send_to_right(f"ELECTION|{candidate}")
             return
 
+        # Bei einer kleineren Kandidaten-ID setzt der Node einmalig seine eigene höhere ID ein.
         if candidate < self.node_id:
             with self.state_lock:
                 already_participant = self.participant
@@ -398,10 +441,12 @@ class Node:
                     self.become_leader("higher id but no reachable right neighbor yet")
             return
 
+        # Kommt die eigene ID zurück, war sie die höchste aktive ID und dieser Node gewinnt.
         # candidate == own id means the id travelled around the whole ring.
         self.become_leader("own election id returned")
         self.send_to_right(f"LEADER|{self.node_id}")
 
+    # Setzt den lokalen Zustand auf Leader und beendet die Teilnahme an der Wahl.
     def become_leader(self, reason: str) -> None:
         with self.state_lock:
             changed = self.leader_id != self.node_id
@@ -411,6 +456,7 @@ class Node:
         if changed:
             log(self.node_id, f"I AM LEADER ({reason})")
 
+    # Übernimmt die gewählte Leader-ID und leitet die Bekanntgabe einmal durch den Ring.
     def handle_leader(self, leader: int) -> None:
         with self.state_lock:
             changed = self.leader_id != leader
@@ -425,16 +471,20 @@ class Node:
         else:
             log(self.node_id, "LEADER announcement completed full ring")
 
+    # -------------------- Heartbeats und Fehlertoleranz --------------------
     # Heartbeat and fault tolerance
 
+    # Leader senden Lebenszeichen; Follower überwachen deren Ausbleiben mit einem Timeout.
     def heartbeat_loop(self) -> None:
         while self.running:
             time.sleep(HEARTBEAT_INTERVAL)
+            # Der Leader erhöht die Sequenznummer und schickt den Heartbeat durch den Ring.
             if self.is_leader():
                 self.heartbeat_seq += 1
                 if len(self.active_node_ids()) > 1:
                     self.send_to_right(f"HEARTBEAT|{self.node_id}|{self.heartbeat_seq}")
                 log(self.node_id, f"HEARTBEAT sent through ring seq={self.heartbeat_seq}")
+            # Ein Follower startet bei unbekanntem oder zu lange stillem Leader eine neue Wahl.
             else:
                 with self.state_lock:
                     leader = self.leader_id
@@ -448,6 +498,7 @@ class Node:
                         self.participant = False
                     self.start_election("leader heartbeat timeout")
 
+    # Aktualisiert beim Empfang eines Heartbeats den letzten bekannten Lebenszeitpunkt des Leaders.
     def handle_heartbeat(self, leader: int, seq: int) -> None:
         with self.state_lock:
             self.leader_id = leader
@@ -455,13 +506,16 @@ class Node:
             self.last_heartbeat = now()
         log(self.node_id, f"HEARTBEAT received from leader {leader} seq={seq}")
 
+        # Jeder Follower leitet den Heartbeat weiter, bis er wieder beim Leader ankommt.
         if leader != self.node_id:
             self.send_to_right(f"HEARTBEAT|{leader}|{seq}")
         else:
             log(self.node_id, f"HEARTBEAT seq={seq} completed full ring")
 
+    # -------------------- Chat-Server --------------------
     # Chat client server
 
+    # TCP-Server für Chat-Clients; jede Client-Verbindung erhält einen eigenen Thread.
     def client_server(self) -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -480,6 +534,7 @@ class Node:
             threading.Thread(target=self.handle_client, args=(conn, addr), daemon=True).start()
         srv.close()
 
+    # Akzeptiert Clients nur als Leader; Follower antworten mit NOT_LEADER.
     def handle_client(self, conn: socket.socket, addr) -> None:
         if not self.is_leader():
             with self.state_lock:
@@ -494,6 +549,7 @@ class Node:
                 pass
             return
 
+        # Der Leader bestätigt die Verbindung mit WELCOME und hält den Socket geöffnet.
         try:
             conn.sendall(f"WELCOME|{self.node_id}\n".encode("utf-8"))
         except OSError:
@@ -504,6 +560,7 @@ class Node:
             self.clients.append(conn)
         log(self.node_id, f"CLIENT connected from {addr}")
 
+        # TCP ist ein Datenstrom: Der Puffer sammelt Daten bis zu einem vollständigen Zeilenumbruch.
         buf = b""
         try:
             while self.running and self.is_leader():
@@ -518,6 +575,7 @@ class Node:
                         self.accept_chat_message(text)
         except OSError:
             pass
+        # Beim Verbindungsende wird der Client sauber aus der gemeinsamen Liste entfernt.
         finally:
             with self.clients_lock:
                 if conn in self.clients:
@@ -528,20 +586,25 @@ class Node:
                 pass
             log(self.node_id, f"CLIENT disconnected from {addr}")
 
+    # Verarbeitet eine neue Chat-Nachricht zentral beim Leader.
     def accept_chat_message(self, text: str) -> None:
+        # Die Kombination aus Leader-ID und lokalem Zähler bildet eine eindeutige Nachrichten-ID.
         self.message_counter += 1
         msg_id = f"{self.node_id}-{self.message_counter}"
+        # Speichert höchstens die letzten 30 Nachrichten im Arbeitsspeicher.
         with self.history_lock:
             self.chat_history.append((msg_id, text))
             self.chat_history = self.chat_history[-30:]
             self.seen_replica_ids.add(msg_id)
 
+        # Erst an alle verbundenen Clients senden, danach eine Kopie durch den Server-Ring schicken.
         log(self.node_id, f"CHAT from client: {text}")
         self.broadcast_to_clients(text)
 
         if len(self.active_node_ids()) > 1:
             self.send_to_right(f"REPLICA|{self.node_id}|{msg_id}|{safe_b64(text)}")
 
+    # Verteilt eine Chat-Nachricht an alle verbundenen Clients und entfernt tote Verbindungen.
     def broadcast_to_clients(self, text: str) -> None:
         dead = []
         with self.clients_lock:
@@ -554,6 +617,7 @@ class Node:
                 if c in self.clients:
                     self.clients.remove(c)
 
+    # Speichert ein Replikat höchstens einmal und leitet es anschließend im Ring weiter.
     def handle_replica(self, line: str) -> None:
         # REPLICA|origin_leader_id|message_id|base64_text
         parts = line.split("|", 3)
@@ -569,10 +633,12 @@ class Node:
         except Exception:
             return
 
+        # Erreicht das Replikat wieder den ursprünglichen Leader, ist die Ringrunde abgeschlossen.
         if origin_leader == self.node_id:
             log(self.node_id, f"REPLICA {msg_id} completed full ring")
             return
 
+        # seen_replica_ids verhindert doppelte Speicherung derselben Nachrichten-ID.
         with self.history_lock:
             is_new = msg_id not in self.seen_replica_ids
             if is_new:
@@ -584,6 +650,7 @@ class Node:
             log(self.node_id, f"REPLICA stored message {msg_id}: {text}")
         self.send_to_right(line)
 
+    # Gibt regelmäßig den aktuellen Zustand aus, damit Ring, Leader und Replikation sichtbar sind.
     def status_loop(self) -> None:
         while self.running:
             time.sleep(STATUS_INTERVAL)
@@ -599,6 +666,7 @@ class Node:
                 f"STATUS role={self.role()} leader={leader} ring=[{self.active_ring_string()}] right={right} clients={client_count} replicated_messages={history_count}",
             )
 
+    # Wartet beim Start kurz auf Discovery; nur ohne bekannten Leader wird eine Wahl begonnen.
     def startup_election_later(self) -> None:
         time.sleep(2.5)
         with self.state_lock:
@@ -606,11 +674,13 @@ class Node:
         if leader is None:
             self.start_election("startup")
 
+    # Startet alle dauerhaften Aufgaben parallel als Hintergrund-Threads.
     def run(self) -> None:
         log(self.node_id, "starting Distributed Chat Server Node")
         log(self.node_id, f"LAN address announced to others: {self.host}")
         log(self.node_id, f"node port={self.node_port}, client port={self.client_port}")
 
+        # Jeder Eintrag ist eine unabhängig laufende Aufgabe des verteilten Servers.
         threads = [
             self.discovery_sender,
             self.discovery_listener,
@@ -623,6 +693,7 @@ class Node:
         for target in threads:
             threading.Thread(target=target, daemon=True).start()
 
+        # Der Hauptthread hält den Prozess am Leben und reagiert auf Ctrl+C.
         try:
             while True:
                 time.sleep(1.0)
@@ -632,6 +703,7 @@ class Node:
             time.sleep(0.5)
 
 
+# Liest die eindeutige Node-ID und optional eine feste Host-IP aus der Kommandozeile.
 def parse_args():
     parser = argparse.ArgumentParser(description="Distributed Chat System server node")
     parser.add_argument("--id", type=int, required=True, help="Unique node id, e.g. 1, 2, 3")
@@ -639,6 +711,7 @@ def parse_args():
     return parser.parse_args()
 
 
+# Programmeinstieg: Argumente prüfen und anschließend den Node starten.
 if __name__ == "__main__":
     args = parse_args()
     if args.id <= 0:

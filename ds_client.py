@@ -19,6 +19,7 @@ import threading
 import time
 from typing import Dict, Optional, Tuple
 
+# Netzwerkdaten für die dynamische Suche nach Server-Nodes.
 MULTICAST_GROUP = "239.1.1.1"
 DISCOVERY_PORT = 50000
 DISCOVERY_LISTEN_TIME = 3.0
@@ -26,6 +27,7 @@ RECONNECT_DELAY = 2.0
 
 
 def discover_nodes(seconds: float = DISCOVERY_LISTEN_TIME) -> Dict[int, Dict[str, object]]:
+    # Erstellt einen UDP-Socket, der HELLO-Nachrichten der Server empfängt.
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     if hasattr(socket, "SO_REUSEPORT"):
@@ -35,12 +37,14 @@ def discover_nodes(seconds: float = DISCOVERY_LISTEN_TIME) -> Dict[int, Dict[str
             pass
     sock.bind(("", DISCOVERY_PORT))
     try:
+        # Der Client tritt der Multicast-Gruppe bei und kann dadurch Server-Ankündigungen empfangen.
         mreq = struct.pack("4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     except OSError:
         pass
     sock.settimeout(1.0)
 
+    # Hier werden alle während des Suchzeitraums gefundenen Nodes gespeichert.
     found: Dict[int, Dict[str, object]] = {}
     deadline = time.time() + seconds
     while time.time() < deadline:
@@ -50,6 +54,8 @@ def discover_nodes(seconds: float = DISCOVERY_LISTEN_TIME) -> Dict[int, Dict[str
             continue
         except OSError:
             break
+
+        # Zerlegt die HELLO-Nachricht in ihre einzelnen Felder.
         parts = data.decode("utf-8", errors="ignore").strip().split("|")
         # HELLO|node_id|host|node_port|client_port|role|leader_id
         if len(parts) != 7 or parts[0] != "HELLO":
@@ -62,6 +68,8 @@ def discover_nodes(seconds: float = DISCOVERY_LISTEN_TIME) -> Dict[int, Dict[str
             leader = int(parts[6])
         except ValueError:
             continue
+
+        # Speichert nur die Informationen, die der Client für die Verbindung benötigt.
         found[nid] = {
             "host": host,
             "client_port": client_port,
@@ -73,17 +81,20 @@ def discover_nodes(seconds: float = DISCOVERY_LISTEN_TIME) -> Dict[int, Dict[str
 
 
 def connect_to_leader() -> Optional[socket.socket]:
+    # Startet zuerst die dynamische Suche nach erreichbaren Nodes.
     nodes = discover_nodes()
     if not nodes:
         print("[client] no nodes discovered yet")
         return None
 
+    # Gibt die gefundenen Nodes mit Rolle und bekannter Leader-ID aus.
     visible = {
         nid: f"{info['host']}:{info['client_port']} role={info['role']} leader={info['leader']}"
         for nid, info in nodes.items()
     }
     print(f"[client] DISCOVERY found nodes: {visible}", flush=True)
 
+    # Bevorzugt die Leader-ID, die von den meisten gefundenen Nodes angekündigt wird.
     leader_ids = [int(info["leader"]) for info in nodes.values() if int(info["leader"]) > 0]
     preferred = []
     if leader_ids:
@@ -93,10 +104,12 @@ def connect_to_leader() -> Optional[socket.socket]:
             preferred.append(leader)
 
     # Fallback: try all discovered nodes, highest id first.
+    # Falls der angekündigte Leader nicht erreichbar ist, werden die übrigen Nodes getestet.
     for nid in sorted(nodes.keys(), reverse=True):
         if nid not in preferred:
             preferred.append(nid)
 
+    # Versucht die Nodes der Reihe nach per TCP zu erreichen.
     for nid in preferred:
         info = nodes[nid]
         host = str(info["host"])
@@ -106,12 +119,16 @@ def connect_to_leader() -> Optional[socket.socket]:
             s.settimeout(3.0)
             s.connect((host, port))
             data = b""
+
+            # Wartet auf die erste Antwort des Servers: WELCOME oder NOT_LEADER.
             while b"\n" not in data:
                 chunk = s.recv(256)
                 if not chunk:
                     break
                 data += chunk
             reply = data.decode("utf-8", errors="replace").strip()
+
+            # Nur der aktuelle Leader akzeptiert die Verbindung dauerhaft.
             if reply.startswith("WELCOME"):
                 print(f"[client] CONNECTED to leader node {nid} at {host}:{port}", flush=True)
                 s.settimeout(None)
@@ -124,6 +141,7 @@ def connect_to_leader() -> Optional[socket.socket]:
 
 
 def receive_loop(sock: socket.socket, stop: Dict[str, bool]) -> None:
+    # Läuft in einem eigenen Thread und empfängt Chat-Nachrichten vom Leader.
     buf = b""
     while not stop["stop"]:
         try:
@@ -133,15 +151,20 @@ def receive_loop(sock: socket.socket, stop: Dict[str, bool]) -> None:
         if not chunk:
             break
         buf += chunk
+
+        # Eine vollständige Nachricht endet mit einem Zeilenumbruch.
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
             text = line.decode("utf-8", errors="replace").strip()
             if text:
                 print(text, flush=True)
+
+    # Signalisiert dem Hauptprogramm, dass die Verbindung beendet wurde.
     stop["stop"] = True
 
 
 def stdin_reader(input_queue: "queue.Queue[Optional[str]]", stop: Dict[str, bool]) -> None:
+    # Liest Benutzereingaben in einem separaten Thread, damit Empfang und Eingabe parallel möglich sind.
     while not stop["stop"]:
         try:
             line = input()
@@ -153,6 +176,8 @@ def stdin_reader(input_queue: "queue.Queue[Optional[str]]", stop: Dict[str, bool
 
 def main() -> None:
     print("=== Distributed Chat Client ===", flush=True)
+
+    # Fragt so lange nach einem Namen, bis eine gültige Eingabe vorhanden ist.
     username = ""
     while not username.strip():
         try:
@@ -163,6 +188,7 @@ def main() -> None:
 
     print("[client] searching for leader via dynamic discovery...", flush=True)
 
+    # Diese Schleife sorgt dafür, dass der Client nach einem Verbindungsverlust erneut sucht.
     while True:
         sock = connect_to_leader()
         if sock is None:
@@ -174,8 +200,11 @@ def main() -> None:
                 return
             continue
 
+        # Gemeinsames Stop-Signal für Empfangs- und Eingabe-Thread.
         stop = {"stop": False}
         threading.Thread(target=receive_loop, args=(sock, stop), daemon=True).start()
+
+        # Die Queue übergibt Benutzereingaben sicher vom Eingabe-Thread an die Hauptschleife.
         input_queue: "queue.Queue[Optional[str]]" = queue.Queue()
         threading.Thread(target=stdin_reader, args=(input_queue, stop), daemon=True).start()
 
@@ -193,6 +222,7 @@ def main() -> None:
                 if not line:
                     continue
                 try:
+                    # Sendet Benutzername und Nachricht über die bestehende TCP-Verbindung an den Leader.
                     sock.sendall(f"{username}: {line}\n".encode("utf-8"))
                 except OSError:
                     stop["stop"] = True
@@ -205,6 +235,7 @@ def main() -> None:
                 pass
             return
 
+        # Nach einem Verbindungsverlust wird der alte Socket geschlossen und die Discovery neu gestartet.
         print("[client] connection lost; rediscovering leader...", flush=True)
         try:
             sock.close()
@@ -214,4 +245,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Startpunkt des Programms, wenn die Datei direkt ausgeführt wird.
     main()
